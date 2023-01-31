@@ -6,6 +6,7 @@ use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
+use TYPO3\CMS\Core\Database\Connection;
 use TYPO3\CMS\Core\Database\ConnectionPool;
 use TYPO3\CMS\Core\Routing\PageArguments;
 use TYPO3\CMS\Core\Site\Entity\SiteLanguage;
@@ -29,29 +30,28 @@ class DynamicLanguageMode implements MiddlewareInterface
         $site = $request->getAttribute('site');
         $default = $site->getLanguages()[0];
         if ($lang->getLanguageId() !== $default->getLanguageId()) {
-            // Check if page is in "Free mode" and apply a dynamic language configuration in that case
-            $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable('tt_content');
+
+            // Check if page is in "Free mode" and set fallback type to "free" in that case
+            $queryBuilder = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable('pages');
             $query = $queryBuilder
                 ->count('*')
-                ->from('tt_content', 't')
-                ->where('l18n_parent = 0')
-                ->andWhere($queryBuilder->expr()->eq('t.sys_language_uid', $queryBuilder->createNamedParameter(intval($lang->getLanguageId()), \PDO::PARAM_INT)))
-                ->andWhere($queryBuilder->expr()->eq('t.pid', $queryBuilder->createNamedParameter(intval($pageArguments->getPageId()), \PDO::PARAM_INT)));
-            $countElements = $query->execute()->fetchColumn();
+                ->from('pages', 'p')
+                ->join(
+                    'p',
+                    'tt_content',
+                    'c',
+                    $queryBuilder->expr()->eq('c.pid', $queryBuilder->quoteIdentifier('p.l10n_parent')))
+                ->where(
+                    $queryBuilder->expr()->eq('p.l10n_parent', $queryBuilder->createNamedParameter($pageArguments->getPageId(), Connection::PARAM_INT)),
+                    $queryBuilder->expr()->eq('p.sys_language_uid', $queryBuilder->createNamedParameter($lang->getLanguageId(), Connection::PARAM_INT)),
+                    $queryBuilder->expr()->eq('c.sys_language_uid', $queryBuilder->createNamedParameter($lang->getLanguageId(), Connection::PARAM_INT)),
+                    $queryBuilder->expr()->eq('c.pid', $queryBuilder->createNamedParameter($pageArguments->getPageId(), Connection::PARAM_INT)),
+                    $queryBuilder->expr()->eq('c.l18n_parent', $queryBuilder->createNamedParameter(0, Connection::PARAM_INT)),
+                );
+            $count = $query->executeQuery()->fetchOne();
 
-	    $countPage = 0;
-	    if ($countElements > 0) {
-                $queryBuilderPage = GeneralUtility::makeInstance(ConnectionPool::class)->getQueryBuilderForTable('pages');
-                $queryPage = $queryBuilderPage
-                    ->count('*')
-                    ->from('pages', 'p')
-                    ->where($queryBuilder->expr()->eq('p.l10n_parent', $queryBuilderPage->createNamedParameter(intval($pageArguments->getPageId()), \PDO::PARAM_INT)))
-                    ->andWhere($queryBuilder->expr()->eq('p.sys_language_uid', $queryBuilderPage->createNamedParameter(intval($lang->getLanguageId()), \PDO::PARAM_INT)));
-                $countPage = $queryPage->execute()->fetchColumn();
-            }
-
-            if ($countElements > 0 && $countPage > 0) {
-                \Closure::bind(function() use ($lang, $newId) {
+            if ($count > 0) {
+                \Closure::bind(function() use ($lang) {
                     $lang->fallbackType = 'free';
                     $lang->fallbackLanguageIds = [];
                 }, null, SiteLanguage::class)();
